@@ -1,22 +1,17 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
 const app = express();
-
 const port = process.env.PORT || 3000;
 
-// Middleware - ORDER MATTERS!
+// Middleware
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
-app.set('trust proxy', 1);
 
-// In-memory storage
+// Storage
 let visits = [];
 
-// Utility function
+// Helper function
 function extractDomain(referrer) {
   if (!referrer || referrer === '') return 'direct';
   try {
@@ -27,169 +22,145 @@ function extractDomain(referrer) {
   }
 }
 
-// Root endpoint
+// ROOT - Test this first
 app.get('/', (req, res) => {
   res.json({
-    message: 'Referrer tracking server is running!',
-    status: 'active',
-    endpoints: {
-      'POST /log-visit': 'Log a new visit',
-      'GET /api/dashboard': 'Get dashboard data (JSON)',
-      'GET /dashboard': 'View dashboard (HTML)',
-      'GET /health': 'Health check'
-    }
+    message: 'Server is running!',
+    status: 'OK',
+    endpoints: [
+      'GET /',
+      'POST /log-visit', 
+      'GET /api/dashboard',
+      'GET /dashboard'
+    ],
+    totalVisits: visits.length
   });
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'healthy', 
-    uptime: process.uptime(),
-    totalVisits: visits.length,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// THIS IS THE IMPORTANT ENDPOINT - Make sure it exists!
+// LOG VISIT - This is what's failing
 app.post('/log-visit', (req, res) => {
-  console.log('📥 Received POST request to /log-visit');
-  console.log('📝 Request body:', req.body);
+  console.log('=== LOG VISIT REQUEST ===');
+  console.log('Method:', req.method);
+  console.log('Path:', req.path);
+  console.log('Body:', req.body);
   
   try {
-    const { referrer, userAgent, currentUrl, pageTitle } = req.body;
+    const { referrer, userAgent } = req.body;
     const domain = extractDomain(referrer);
     
     const visit = {
-      domain,
-      referrer: referrer || 'Direct',
-      userAgent: userAgent || req.get('User-Agent'),
-      currentUrl: currentUrl || 'unknown',
-      pageTitle: pageTitle || 'unknown',
-      ip: req.ip || 'unknown',
+      domain: domain,
+      referrer: referrer || 'direct',
+      userAgent: userAgent || 'unknown',
       timestamp: new Date().toISOString()
     };
     
     visits.push(visit);
-    console.log(`✅ Visit logged: ${domain} from ${referrer}`);
     
-    res.status(200).json({ 
-      success: true, 
-      message: 'Visit logged successfully',
-      visit: visit
-    });
-  } catch (error) {
-    console.error('❌ Error logging visit:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to log visit',
-      details: error.message
-    });
-  }
-});
-
-// Dashboard API
-app.get('/api/dashboard', (req, res) => {
-  try {
-    const summary = {};
-    visits.forEach(visit => {
-      if (!summary[visit.domain]) {
-        summary[visit.domain] = { 
-          count: 0, 
-          lastVisit: '',
-          firstVisit: visit.timestamp
-        };
-      }
-      summary[visit.domain].count++;
-      summary[visit.domain].lastVisit = visit.timestamp;
-    });
-
-    const result = Object.entries(summary)
-      .map(([domain, data]) => ({
-        domain,
-        visits: data.count,
-        lastVisit: data.lastVisit,
-        firstVisit: data.firstVisit
-      }))
-      .sort((a, b) => b.visits - a.visits);
-
-    res.status(200).json({
+    console.log('✅ Visit saved:', visit);
+    
+    res.json({
       success: true,
-      totalVisits: visits.length,
-      uniqueDomains: result.length,
-      domains: result,
-      recentVisits: visits.slice(-10).reverse()
+      message: 'Visit logged',
+      visit: visit,
+      totalVisits: visits.length
     });
+    
   } catch (error) {
-    console.error('❌ Error generating dashboard data:', error);
-    res.status(500).json({ 
+    console.error('❌ Error:', error);
+    res.status(500).json({
       success: false,
-      error: 'Failed to generate dashboard data',
-      details: error.message
+      error: error.message
     });
   }
 });
 
-// Dashboard HTML
-app.get('/dashboard', (req, res) => {
-  const dashboardPath = path.join(__dirname, 'public', 'dashboard.html');
+// DASHBOARD API
+app.get('/api/dashboard', (req, res) => {
+  const summary = {};
   
-  if (fs.existsSync(dashboardPath)) {
-    res.sendFile(dashboardPath);
-  } else {
-    res.send(`
-<!DOCTYPE html>
-<html>
-<head><title>Dashboard</title></head>
-<body>
-<h1>📊 Dashboard</h1>
-<p>Total visits: <span id="total">Loading...</span></p>
-<div id="data"></div>
-<script>
-fetch('/api/dashboard')
-.then(r => r.json())
-.then(data => {
-  document.getElementById('total').textContent = data.totalVisits;
-  document.getElementById('data').innerHTML = 
-    '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
-});
-</script>
-</body>
-</html>
-    `);
-  }
-});
+  visits.forEach(visit => {
+    if (!summary[visit.domain]) {
+      summary[visit.domain] = { count: 0, lastVisit: '' };
+    }
+    summary[visit.domain].count++;
+    summary[visit.domain].lastVisit = visit.timestamp;
+  });
 
-// Error handling
-app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err.stack);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: err.message
+  const domains = Object.entries(summary).map(([domain, data]) => ({
+    domain,
+    visits: data.count,
+    lastVisit: data.lastVisit
+  }));
+
+  res.json({
+    success: true,
+    totalVisits: visits.length,
+    uniqueDomains: domains.length,
+    domains: domains,
+    recentVisits: visits.slice(-5)
   });
 });
 
-// 404 handler
+// DASHBOARD HTML
+app.get('/dashboard', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dashboard</title>
+    <style>
+        body { font-family: Arial; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
+        .stat { background: #e3f2fd; padding: 15px; margin: 10px 0; border-radius: 4px; }
+        button { background: #2196f3; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Visitor Dashboard</h1>
+        <button onclick="refresh()">🔄 Refresh</button>
+        <div id="stats">Loading...</div>
+    </div>
+    
+    <script>
+        function refresh() {
+            fetch('/api/dashboard')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('stats').innerHTML = \`
+                    <div class="stat"><strong>Total Visits:</strong> \${data.totalVisits}</div>
+                    <div class="stat"><strong>Unique Domains:</strong> \${data.uniqueDomains}</div>
+                    <div class="stat"><strong>Recent Visits:</strong><br>
+                        \${data.recentVisits.map(v => \`\${v.domain} - \${v.timestamp}\`).join('<br>')}
+                    </div>
+                \`;
+            });
+        }
+        refresh();
+    </script>
+</body>
+</html>
+  `);
+});
+
+// 404 Handler
 app.use((req, res) => {
-  console.log(`❌ 404 - Path not found: ${req.method} ${req.path}`);
-  res.status(404).json({ 
+  console.log(`❌ 404: ${req.method} ${req.path}`);
+  res.status(404).json({
     error: 'Endpoint not found',
-    path: req.path,
     method: req.method,
-    availableEndpoints: [
-      'GET /',
-      'GET /health',
-      'POST /log-visit',
-      'GET /api/dashboard',
-      'GET /dashboard'
-    ]
+    path: req.path,
+    availableEndpoints: ['GET /', 'POST /log-visit', 'GET /api/dashboard', 'GET /dashboard']
   });
 });
 
 // Start server
-app.listen(port, '0.0.0.0', () => {
+app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
-  console.log(`📊 Dashboard: /dashboard`);
-  console.log(`🔗 API: /api/dashboard`);
-  console.log(`📝 Log visits: POST /log-visit`);
+  console.log('Available routes:');
+  console.log('  GET  /');
+  console.log('  POST /log-visit');
+  console.log('  GET  /api/dashboard');
+  console.log('  GET  /dashboard');
 });

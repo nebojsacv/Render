@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Referrer Tracking Dashboard</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f8fafc;
+            color: #1a202c;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            border: 1px solid #e2e8f0;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #3b82f6;
+            margin-bottom: 8px;
+        }
+        .stat-label {
+            color: #64748b;
+            font-weight: 500;
+        }
+        table {
+            width: 100%;
+            background: white;
+            border-collapse: collapse;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            border: 1px solid #e2e8f0;
+            margin-bottom: 2rem;
+        }
+        th, td {
+            padding: 16px;
+            text-align: left;
+        }
+        th {
+            background-color: #f8fafc;
+            font-weight: 600;
+            color: #374151;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        td {
+            border-bottom: 1px solid #f1f5f9;
+        }
+        .refresh-btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+        .refresh-btn:hover {
+            background: #2563eb;
+        }
+        .status {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-weight: 500;
+            margin-bottom: 1rem;
+        }
+        .status.success {
+            background: #dcfce7;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
+        .status.error {
+            background: #fef2f2;
+            color: #dc2626;
+            border: 1px solid #fecaca;
+        }
+        .loading {
+            text-align: center;
+            color: #64748b;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Referrer Tracking Dashboard</h1>
+            <button class="refresh-btn" onclick="loadDashboard()">🔄 Refresh Data</button>
+        </div>
+        
+        <div id="status"></div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-number" id="totalVisits">-</div>
+                <div class="stat-label">Total Visits</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="uniqueDomains">-</div>
+                <div class="stat-label">Unique Domains</div>
+            </div>
+        </div>
+
+        <h2>📈 Visits by Domain</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Domain</th>
+                    <th>Total Visits</th>
+                    <th>Last Visit</th>
+                    <th>First Visit</th>
+                </tr>
+            </thead>
+            <tbody id="domainsTable">
+                <tr><td colspan="4" class="loading">Loading data...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>🕒 Recent Visits</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Domain</th>
+                    <th>Referrer</th>
+                    <th>Timestamp</th>
+                </tr>
+            </thead>
+            <tbody id="recentVisitsTable">
+                <tr><td colspan="3" class="loading">Loading data...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        function showStatus(message, type = 'success') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+            setTimeout(() => {
+                statusDiv.innerHTML = '';
+            }, 3000);
+        }
+
+        async function loadDashboard() {
+            try {
+                const response = await fetch('/api/dashboard');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.error || 'Unknown error occurred');
+                }
+                
+                // Update stats
+                document.getElementById('totalVisits').textContent = data.totalVisits || 0;
+                document.getElementById('uniqueDomains').textContent = data.uniqueDomains || 0;
+                
+                // Update domains table
+                const domainsTable = document.getElementById('domainsTable');
+                if (data.domains && data.domains.length > 0) {
+                    domainsTable.innerHTML = data.domains.map(domain => `
+                        <tr>
+                            <td><strong>${domain.domain}</strong></td>
+                            <td>${domain.visits}</td>
+                            <td>${new Date(domain.lastVisit).toLocaleString()}</td>
+                            <td>${new Date(domain.firstVisit).toLocaleString()}</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    domainsTable.innerHTML = '<tr><td colspan="4" class="loading">No visits recorded yet</td></tr>';
+                }
+                
+                // Update recent visits table
+                const recentTable = document.getElementById('recentVisitsTable');
+                if (data.recentVisits && data.recentVisits.length > 0) {
+                    recentTable.innerHTML = data.recentVisits.map(visit => `
+                        <tr>
+                            <td><strong>${visit.domain}</strong></td>
+                            <td>${visit.referrer}</td>
+                            <td>${new Date(visit.timestamp).toLocaleString()}</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    recentTable.innerHTML = '<tr><td colspan="3" class="loading">No recent visits</td></tr>';
+                }
+                
+                showStatus(`✅ Dashboard updated successfully (${data.totalVisits} total visits)`);
+                
+            } catch (error) {
+                console.error('Error loading dashboard:', error);
+                showStatus(`❌ Error loading dashboard: ${error.message}`, 'error');
+                
+                // Show error state in tables
+                document.getElementById('domainsTable').innerHTML = 
+                    '<tr><td colspan="4" class="loading">❌ Failed to load data</td></tr>';
+                document.getElementById('recentVisitsTable').innerHTML = 
+                    '<tr><td colspan="3" class="loading">❌ Failed to load data</td></tr>';
+            }
+        }
+        
+        // Load dashboard on page load
+        document.addEventListener('DOMContentLoaded', loadDashboard);
+        
+        // Auto-refresh every 60 seconds
+        setInterval(loadDashboard, 60000);
+    </script>
+</body>
+</html>

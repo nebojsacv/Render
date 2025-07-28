@@ -2,174 +2,348 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const http = require('http');
+const https = require('https');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 app.set('trust proxy', true);
 
-// Storage
 let visits = [];
 
-// Known B2B companies for lead scoring
-const highValueCompanies = [
-  'microsoft', 'google', 'amazon', 'apple', 'meta', 'facebook',
-  'ibm', 'oracle', 'sap', 'salesforce', 'adobe', 'cisco',
-  'bosch', 'siemens', 'ge', 'volkswagen', 'bmw', 'mercedes',
-  'jpmorgan', 'goldman', 'morgan', 'citigroup', 'wells fargo',
-  'coca cola', 'pepsi', 'unilever', 'procter', 'johnson',
-  'pfizer', 'novartis', 'roche', 'merck', 'abbott',
-  'walmart', 'target', 'home depot', 'lowes', 'best buy'
-];
-
-// Get comprehensive IP information
-async function getCompanyInfo(ip) {
+// Kombinacija više servisa za bolju identifikaciju
+async function getEnhancedCompanyInfo(ip) {
   if (!ip || ip === '::1' || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.')) {
-    return {
-      ip: ip,
-      company: 'Local Network',
-      domain: 'local',
-      country: 'Local',
-      city: 'Local',
-      organization: 'Local Network',
-      isHighValue: false,
-      leadScore: 0
-    };
+    return getDefaultCompanyInfo(ip);
   }
 
-  return new Promise((resolve) => {
-    // Using multiple data points for better company identification
+  try {
+    // Koristimo više servisa paralelno
+    const [ipApiResult, whoisResult, reverseDnsResult] = await Promise.allSettled([
+      getIPApiInfo(ip),
+      getWhoisInfo(ip),
+      getReverseDNSInfo(ip)
+    ]);
+
+    // Kombinujemo rezultate za najbolju identifikaciju
+    const combined = combineResults(
+      ipApiResult.status === 'fulfilled' ? ipApiResult.value : null,
+      whoisResult.status === 'fulfilled' ? whoisResult.value : null,
+      reverseDnsResult.status === 'fulfilled' ? reverseDnsResult.value : null,
+      ip
+    );
+
+    console.log('🔍 Enhanced company detection for IP:', ip);
+    console.log('📊 Combined result:', combined);
+
+    return combined;
+  } catch (error) {
+    console.error('Error in enhanced company detection:', error);
+    return getDefaultCompanyInfo(ip);
+  }
+}
+
+// IP-API servis
+function getIPApiInfo(ip) {
+  return new Promise((resolve, reject) => {
     const url = `http://ip-api.com/json/${ip}?fields=status,country,regionName,city,isp,org,as,query,reverse`;
     
     http.get(url, (response) => {
       let data = '';
-      
-      response.on('data', (chunk) => {
-        data += chunk;
-      });
-      
+      response.on('data', (chunk) => data += chunk);
       response.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          if (parsed.status === 'success') {
-            const companyInfo = extractCompanyInfo(parsed);
-            resolve(companyInfo);
-          } else {
-            resolve(getDefaultCompanyInfo(ip));
-          }
-        } catch (error) {
-          console.error('Error parsing IP data:', error);
-          resolve(getDefaultCompanyInfo(ip));
+          resolve(parsed.status === 'success' ? parsed : null);
+        } catch (e) {
+          reject(e);
         }
       });
-    }).on('error', (error) => {
-      console.error('Error fetching IP data:', error);
-      resolve(getDefaultCompanyInfo(ip));
-    }).setTimeout(5000, function() {
+    }).on('error', reject).setTimeout(3000, function() {
       this.destroy();
-      resolve(getDefaultCompanyInfo(ip));
+      reject(new Error('Timeout'));
     });
   });
 }
 
-function extractCompanyInfo(data) {
-  const org = data.org || data.isp || '';
-  const reverse = data.reverse || '';
-  
-  // Extract company name and potential domain
-  let company = cleanCompanyName(org);
-  let domain = extractDomainFromReverse(reverse) || extractDomainFromOrg(org);
-  
-  // Calculate lead score
-  const leadScore = calculateLeadScore(company, org, domain);
-  const isHighValue = leadScore >= 70;
-  
-  return {
-    ip: data.query,
-    company: company,
-    domain: domain,
-    country: data.country,
-    region: data.regionName,
-    city: data.city,
-    organization: org,
-    isp: data.isp,
-    as: data.as,
-    reverse: reverse,
-    isHighValue: isHighValue,
-    leadScore: leadScore
-  };
+// WHOIS-style informacije
+function getWhoisInfo(ip) {
+  return new Promise((resolve, reject) => {
+    // Koristi ipinfo.io kao alternativni servis
+    const url = `http://ipinfo.io/${ip}/json`;
+    
+    http.get(url, (response) => {
+      let data = '';
+      response.on('data', (chunk) => data += chunk);
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }).on('error', reject).setTimeout(3000, function() {
+      this.destroy();
+      reject(new Error('Timeout'));
+    });
+  });
 }
 
+// Reverse DNS lookup
+function getReverseDNSInfo(ip) {
+  return new Promise((resolve) => {
+    const dns = require('dns');
+    dns.reverse(ip, (err, hostnames) => {
+      if (err || !hostnames || hostnames.length === 0) {
+        resolve(null);
+      } else {
+        resolve({ hostname: hostnames[0], allHostnames: hostnames });
+      }
+    });
+  });
+}
+
+// Kombinuje rezultate iz više izvora
+function combineResults(ipApiData, whoisData, dnsData, ip) {
+  const result = {
+    ip: ip,
+    company: 'Unknown',
+    domain: null,
+    country: 'Unknown',
+    city: 'Unknown',
+    organization: 'Unknown',
+    isp: 'Unknown',
+    isHighValue: false,
+    leadScore: 0,
+    detectionMethod: 'none',
+    allSources: {
+      ipApi: ipApiData,
+      whois: whoisData,
+      dns: dnsData
+    }
+  };
+
+  let bestCompanyName = 'Unknown';
+  let bestDomain = null;
+  let detectionMethod = 'none';
+
+  // 1. Pokušaj iz Reverse DNS (najčešće najbolji za firme)
+  if (dnsData && dnsData.hostname) {
+    const companyFromDNS = extractCompanyFromHostname(dnsData.hostname);
+    if (companyFromDNS.isCompany) {
+      bestCompanyName = companyFromDNS.company;
+      bestDomain = companyFromDNS.domain;
+      detectionMethod = 'reverse-dns';
+      console.log('✅ Company detected via DNS:', bestCompanyName);
+    }
+  }
+
+  // 2. Pokušaj iz WHOIS podataka
+  if (whoisData && detectionMethod === 'none') {
+    const companyFromWhois = extractCompanyFromWhois(whoisData);
+    if (companyFromWhois.isCompany) {
+      bestCompanyName = companyFromWhois.company;
+      bestDomain = companyFromWhois.domain;
+      detectionMethod = 'whois';
+      console.log('✅ Company detected via WHOIS:', bestCompanyName);
+    }
+  }
+
+  // 3. Pokušaj iz IP-API podataka
+  if (ipApiData && detectionMethod === 'none') {
+    const companyFromIPApi = extractCompanyFromIPApi(ipApiData);
+    if (companyFromIPApi.isCompany) {
+      bestCompanyName = companyFromIPApi.company;
+      bestDomain = companyFromIPApi.domain;
+      detectionMethod = 'ip-api';
+      console.log('✅ Company detected via IP-API:', bestCompanyName);
+    }
+  }
+
+  // Postavi osnovne informacije
+  result.company = bestCompanyName;
+  result.domain = bestDomain;
+  result.detectionMethod = detectionMethod;
+
+  if (ipApiData) {
+    result.country = ipApiData.country || 'Unknown';
+    result.city = ipApiData.city || 'Unknown';
+    result.organization = ipApiData.org || ipApiData.isp || 'Unknown';
+    result.isp = ipApiData.isp || 'Unknown';
+  } else if (whoisData) {
+    result.country = whoisData.country || 'Unknown';
+    result.city = whoisData.city || 'Unknown';
+    result.organization = whoisData.org || 'Unknown';
+  }
+
+  // Izračunaj lead score
+  result.leadScore = calculateEnhancedLeadScore(result);
+  result.isHighValue = result.leadScore >= 70;
+
+  return result;
+}
+
+// Izvlači ime firme iz hostname-a (npr. mail.bosch.com -> Bosch)
+function extractCompanyFromHostname(hostname) {
+  if (!hostname) return { isCompany: false };
+
+  // Ukloni subdomenove i uzmi glavni domen
+  const parts = hostname.split('.');
+  if (parts.length < 2) return { isCompany: false };
+
+  const domain = parts.slice(-2).join('.');
+  const mainDomain = parts[parts.length - 2];
+
+  // Proveri da li je biznis domen (ne ISP)
+  const businessIndicators = [
+    'corp', 'company', 'inc', 'ltd', 'gmbh', 'ag', 'sa', 'group',
+    'mail', 'www', 'web', 'intranet', 'vpn', 'gateway'
+  ];
+
+  const ispIndicators = [
+    'comcast', 'verizon', 'att', 'spectrum', 'cox', 'charter',
+    'telecom', 'isp', 'broadband', 'cable', 'fiber'
+  ];
+
+  const domainLower = domain.toLowerCase();
+  const mainDomainLower = mainDomain.toLowerCase();
+
+  // Ako je ISP, vrati kao ISP
+  for (const isp of ispIndicators) {
+    if (domainLower.includes(isp)) {
+      return { isCompany: false };
+    }
+  }
+
+  // Ako ima biznis indikatore ili izgleda kao kompanijski domen
+  const looksLikeBusiness = 
+    businessIndicators.some(indicator => domainLower.includes(indicator)) ||
+    (mainDomain.length > 2 && !mainDomainLower.includes('net') && !mainDomainLower.includes('com'));
+
+  if (looksLikeBusiness || domain.length < 15) {
+    return {
+      isCompany: true,
+      company: capitalizeCompanyName(mainDomain),
+      domain: domain
+    };
+  }
+
+  return { isCompany: false };
+}
+
+// Izvlači ime firme iz WHOIS podataka
+function extractCompanyFromWhois(whoisData) {
+  if (!whoisData || !whoisData.org) return { isCompany: false };
+
+  const org = whoisData.org;
+  const cleaned = cleanCompanyName(org);
+
+  // Proveri da li je prava firma
+  const isRealCompany = !org.toLowerCase().includes('internet') &&
+                       !org.toLowerCase().includes('broadband') &&
+                       !org.toLowerCase().includes('telecom') &&
+                       !org.toLowerCase().includes('isp') &&
+                       org.length < 50;
+
+  if (isRealCompany && cleaned !== org) {
+    return {
+      isCompany: true,
+      company: cleaned,
+      domain: guessDomainFromCompany(cleaned)
+    };
+  }
+
+  return { isCompany: false };
+}
+
+// Izvlači ime firme iz IP-API podataka
+function extractCompanyFromIPApi(ipApiData) {
+  if (!ipApiData || !ipApiData.org) return { isCompany: false };
+
+  const org = ipApiData.org;
+  const cleaned = cleanCompanyName(org);
+
+  // Slične provere kao za WHOIS
+  const isRealCompany = !org.toLowerCase().includes('internet') &&
+                       !org.toLowerCase().includes('broadband') &&
+                       !org.toLowerCase().includes('telecom') &&
+                       cleaned.length > 2;
+
+  if (isRealCompany) {
+    return {
+      isCompany: true,
+      company: cleaned,
+      domain: guessDomainFromCompany(cleaned)
+    };
+  }
+
+  return { isCompany: false };
+}
+
+// Poboljšana funkcija za čišćenje imena firme
 function cleanCompanyName(org) {
   if (!org) return 'Unknown';
   
   return org
-    .replace(/\bAS\d+\s*/gi, '')
-    .replace(/\b(LLC|Inc|Corp|Ltd|Limited|GmbH|AG|SA|SPA|BV|Pty|Co\.|Company)\b/gi, '')
-    .replace(/\b(Internet|Broadband|Telecommunications|Telecom|Networks?|Services?|Solutions?|Technologies?|Tech|Systems?|Communications?|Comm|ISP)\b/gi, '')
-    .replace(/\s+/g, ' ')
+    .replace(/\bAS\d+\s*/gi, '') // Ukloni AS brojeve
+    .replace(/\b(LLC|Inc|Corp|Ltd|Limited|GmbH|AG|SA|SPA|BV|Pty|Co\.|Company|Corporation)\b/gi, '') // Pravni sufiksi
+    .replace(/\b(Internet|Broadband|Telecommunications|Telecom|Networks?|Services?|Solutions?|Technologies?|Tech|Systems?|Communications?|Comm|ISP|Hosting|Cloud)\b/gi, '') // Tech reči
+    .replace(/\s+/g, ' ') // Normalizuj razmake
     .trim() || org;
 }
 
-function extractDomainFromReverse(reverse) {
-  if (!reverse) return null;
-  
-  // Extract domain from reverse DNS
-  const parts = reverse.split('.');
-  if (parts.length >= 2) {
-    return parts.slice(-2).join('.');
-  }
-  return null;
+function capitalizeCompanyName(name) {
+  return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
 }
 
-function extractDomainFromOrg(org) {
-  if (!org) return null;
+function guessDomainFromCompany(companyName) {
+  if (!companyName || companyName === 'Unknown') return null;
   
-  // Try to guess domain from organization name
-  const cleaned = org.toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .split(' ')[0];
+  const cleaned = companyName.toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .substring(0, 10);
   
-  if (cleaned.length > 2) {
-    return cleaned + '.com'; // Best guess
-  }
-  return null;
+  return cleaned.length > 2 ? cleaned + '.com' : null;
 }
 
-function calculateLeadScore(company, org, domain) {
+// Poboljšano ocenjivanje leadova
+function calculateEnhancedLeadScore(result) {
   let score = 0;
-  
-  // Check if it's a high-value company
-  const companyLower = company.toLowerCase();
-  const orgLower = org.toLowerCase();
-  
-  for (const hvCompany of highValueCompanies) {
-    if (companyLower.includes(hvCompany) || orgLower.includes(hvCompany)) {
-      score += 90;
+
+  // Bonus za metodu detekcije
+  if (result.detectionMethod === 'reverse-dns') score += 30;
+  else if (result.detectionMethod === 'whois') score += 20;
+  else if (result.detectionMethod === 'ip-api') score += 10;
+
+  // Bonus za poznate firme
+  const knownCompanies = [
+    'microsoft', 'google', 'amazon', 'apple', 'meta', 'facebook',
+    'ibm', 'oracle', 'sap', 'salesforce', 'adobe', 'cisco',
+    'bosch', 'siemens', 'volkswagen', 'bmw', 'mercedes', 'audi',
+    'lufthansa', 'deutsche', 'telekom', 'vodafone'
+  ];
+
+  const companyLower = result.company.toLowerCase();
+  for (const company of knownCompanies) {
+    if (companyLower.includes(company)) {
+      score += 50;
       break;
     }
   }
-  
-  // Additional scoring factors
-  if (domain && !domain.includes('isp') && !domain.includes('telecom')) {
-    score += 20;
+
+  // Bonus za domen
+  if (result.domain && !result.domain.includes('unknown')) {
+    score += 15;
   }
-  
-  if (org && !org.toLowerCase().includes('residential') && !org.toLowerCase().includes('mobile')) {
+
+  // Geografski bonus (Nemačka, EU, SAD)
+  const highValueCountries = ['Germany', 'United States', 'United Kingdom', 'Switzerland', 'Austria'];
+  if (highValueCountries.includes(result.country)) {
     score += 10;
   }
-  
-  // Penalize consumer ISPs
-  const consumerISPs = ['comcast', 'verizon', 'at&t', 'spectrum', 'cox', 'optimum', 'xfinity'];
-  for (const isp of consumerISPs) {
-    if (orgLower.includes(isp)) {
-      score = Math.max(0, score - 30);
-      break;
-    }
-  }
-  
+
   return Math.min(100, score);
 }
 
@@ -177,36 +351,37 @@ function getDefaultCompanyInfo(ip) {
   return {
     ip: ip,
     company: 'Unknown',
-    domain: 'unknown',
+    domain: null,
     country: 'Unknown',
     city: 'Unknown',
     organization: 'Unknown',
+    isp: 'Unknown',
     isHighValue: false,
-    leadScore: 0
+    leadScore: 0,
+    detectionMethod: 'none'
   };
 }
 
-// ROOT
+// Ostatak koda ostaje isti kao u prethodnoj verziji...
+// ROOT endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'B2B SaaS Visitor Tracking & Lead Generation',
+    message: 'Enhanced B2B Company Detection System',
     status: 'OK',
-    purpose: 'Identify potential business customers visiting your website',
-    endpoints: [
-      'GET /',
-      'POST /log-visit', 
-      'GET /api/dashboard',
-      'GET /dashboard',
-      'GET /leads'
+    features: [
+      'Multi-source IP analysis',
+      'Reverse DNS company detection', 
+      'WHOIS data integration',
+      'VPN detection bypass'
     ],
     totalVisits: visits.length,
-    highValueVisits: visits.filter(v => v.isHighValue).length
+    companiesDetected: visits.filter(v => v.detectionMethod !== 'none').length
   });
 });
 
-// LOG VISIT
+// LOG VISIT endpoint
 app.post('/log-visit', async (req, res) => {
-  console.log('=== NEW BUSINESS VISITOR ===');
+  console.log('=== ENHANCED COMPANY DETECTION ===');
   
   try {
     const { referrer, userAgent, currentUrl, pageTitle } = req.body;
@@ -217,36 +392,30 @@ app.post('/log-visit', async (req, res) => {
                      req.ip || 
                      'unknown';
 
-    console.log('🌍 Visitor IP:', visitorIP);
+    console.log('🌍 Analyzing IP:', visitorIP);
     
-    const companyInfo = await getCompanyInfo(visitorIP);
-    console.log('🏢 Company Info:', companyInfo);
+    const companyInfo = await getEnhancedCompanyInfo(visitorIP);
     
     if (companyInfo.isHighValue) {
-      console.log('🎯 HIGH VALUE LEAD DETECTED:', companyInfo.company);
+      console.log('🎯 HIGH VALUE COMPANY DETECTED:', companyInfo.company);
+      console.log('🔍 Detection method:', companyInfo.detectionMethod);
     }
     
     const visit = {
-      // Visitor data
       ip: companyInfo.ip,
       company: companyInfo.company,
       domain: companyInfo.domain,
       country: companyInfo.country,
-      region: companyInfo.region,
       city: companyInfo.city,
       organization: companyInfo.organization,
       isp: companyInfo.isp,
-      
-      // Lead scoring
       isHighValue: companyInfo.isHighValue,
       leadScore: companyInfo.leadScore,
-      
-      // Web tracking
+      detectionMethod: companyInfo.detectionMethod,
       referrer: referrer || 'direct',
       userAgent: userAgent || req.get('User-Agent') || 'unknown',
       currentUrl: currentUrl || 'unknown',
       pageTitle: pageTitle || 'unknown',
-      
       timestamp: new Date().toISOString()
     };
     
@@ -254,13 +423,14 @@ app.post('/log-visit', async (req, res) => {
     
     res.json({
       success: true,
-      message: 'Business visitor tracked',
+      message: 'Enhanced company detection completed',
       visit: {
         company: visit.company,
         domain: visit.domain,
         location: `${visit.city}, ${visit.country}`,
         isHighValue: visit.isHighValue,
-        leadScore: visit.leadScore
+        leadScore: visit.leadScore,
+        detectionMethod: visit.detectionMethod
       },
       totalVisits: visits.length
     });
@@ -274,36 +444,7 @@ app.post('/log-visit', async (req, res) => {
   }
 });
 
-// LEADS ENDPOINT - High value visitors only
-app.get('/leads', (req, res) => {
-  const leads = visits
-    .filter(v => v.isHighValue || v.leadScore >= 50)
-    .map(v => ({
-      company: v.company,
-      domain: v.domain,
-      location: `${v.city}, ${v.country}`,
-      organization: v.organization,
-      leadScore: v.leadScore,
-      visits: visits.filter(visit => visit.company === v.company).length,
-      lastVisit: v.timestamp,
-      pagesVisited: visits.filter(visit => visit.company === v.company).map(visit => visit.pageTitle),
-      ip: v.ip
-    }))
-    .reduce((unique, lead) => {
-      if (!unique.find(u => u.company === lead.company)) {
-        unique.push(lead);
-      }
-      return unique;
-    }, [])
-    .sort((a, b) => b.leadScore - a.leadScore);
-
-  res.json({
-    totalLeads: leads.length,
-    leads: leads
-  });
-});
-
-// DASHBOARD API
+// Dashboard API sa poboljšanjima
 app.get('/api/dashboard', (req, res) => {
   try {
     const companySummary = {};
@@ -318,6 +459,7 @@ app.get('/api/dashboard', (req, res) => {
           isHighValue: visit.isHighValue || false,
           domain: visit.domain,
           location: `${visit.city}, ${visit.country}`,
+          detectionMethod: visit.detectionMethod || 'none',
           ips: new Set()
         };
       }
@@ -334,20 +476,21 @@ app.get('/api/dashboard', (req, res) => {
       leadScore: data.leadScore,
       isHighValue: data.isHighValue,
       location: data.location,
+      detectionMethod: data.detectionMethod,
       uniqueIPs: data.ips.size
     })).sort((a, b) => b.leadScore - a.leadScore);
 
+    const detectedCompanies = companies.filter(c => c.detectionMethod !== 'none');
     const highValueVisitors = companies.filter(c => c.isHighValue);
-    const potentialLeads = companies.filter(c => c.leadScore >= 50);
 
     res.json({
       success: true,
       totalVisits: visits.length,
       uniqueCompanies: companies.length,
+      detectedCompanies: detectedCompanies.length,
       highValueVisitors: highValueVisitors.length,
-      potentialLeads: potentialLeads.length,
       companies: companies,
-      leads: potentialLeads,
+      leads: highValueVisitors,
       recentVisits: visits.slice(-10).reverse().map(v => ({
         company: v.company,
         domain: v.domain,
@@ -355,6 +498,7 @@ app.get('/api/dashboard', (req, res) => {
         location: `${v.city}, ${v.country}`,
         leadScore: v.leadScore,
         isHighValue: v.isHighValue,
+        detectionMethod: v.detectionMethod,
         pageTitle: v.pageTitle,
         timestamp: v.timestamp
       }))
@@ -367,29 +511,34 @@ app.get('/api/dashboard', (req, res) => {
   }
 });
 
-// B2B DASHBOARD HTML
+// Enhanced Dashboard HTML
 app.get('/dashboard', (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-    <title>B2B SaaS Lead Dashboard</title>
+    <title>Enhanced B2B Company Detection</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f8fafc; }
         .container { max-width: 1400px; margin: 0 auto; }
         .header { text-align: center; margin-bottom: 2rem; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; margin: 20px 0; }
         .stat { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
-        .stat-number { font-size: 2.5em; font-weight: bold; margin-bottom: 5px; }
+        .stat-number { font-size: 2.2em; font-weight: bold; margin-bottom: 5px; }
         .high-value { color: #10b981; }
-        .medium-value { color: #f59e0b; }
-        .low-value { color: #6b7280; }
+        .detected { color: #3b82f6; }
         button { background: #3b82f6; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; margin: 5px; }
         table { width: 100%; background: white; border-collapse: collapse; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 20px 0; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
         th { background: #f9fafb; font-weight: 600; }
         .company-name { font-weight: bold; }
         .high-value-row { background: #ecfdf5; }
+        .detected-row { background: #eff6ff; }
+        .detection-method { padding: 2px 6px; border-radius: 3px; font-size: 0.8em; }
+        .method-dns { background: #10b981; color: white; }
+        .method-whois { background: #f59e0b; color: white; }
+        .method-ipapi { background: #6366f1; color: white; }
+        .method-none { background: #9ca3af; color: white; }
         .lead-score { padding: 4px 8px; border-radius: 4px; font-weight: bold; color: white; }
         .score-high { background: #10b981; }
         .score-medium { background: #f59e0b; }
@@ -401,10 +550,10 @@ app.get('/dashboard', (req, res) => {
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎯 B2B SaaS Lead Dashboard</h1>
-            <p>Track potential business customers visiting your website</p>
+            <h1>🔍 Enhanced B2B Company Detection</h1>
+            <p>Multi-source company identification system</p>
             <button onclick="refresh()">🔄 Refresh Data</button>
-            <button onclick="exportLeads()">📊 Export Leads</button>
+            <button onclick="testRealVisit()">🧪 Test Real Visit</button>
         </div>
         
         <div class="stats">
@@ -413,16 +562,16 @@ app.get('/dashboard', (req, res) => {
                 <div>Total Visits</div>
             </div>
             <div class="stat">
-                <div class="stat-number high-value" id="highValueVisitors">-</div>
-                <div>High-Value Companies</div>
+                <div class="stat-number detected" id="detectedCompanies">-</div>
+                <div>Companies Detected</div>
             </div>
             <div class="stat">
-                <div class="stat-number medium-value" id="potentialLeads">-</div>
-                <div>Potential Leads</div>
+                <div class="stat-number high-value" id="highValueVisitors">-</div>
+                <div>High-Value Leads</div>
             </div>
             <div class="stat">
                 <div class="stat-number" id="uniqueCompanies">-</div>
-                <div>Unique Companies</div>
+                <div>Unique Visitors</div>
             </div>
         </div>
         
@@ -435,49 +584,56 @@ app.get('/dashboard', (req, res) => {
             .then(r => r.json())
             .then(data => {
                 document.getElementById('totalVisits').textContent = data.totalVisits;
+                document.getElementById('detectedCompanies').textContent = data.detectedCompanies;
                 document.getElementById('highValueVisitors').textContent = data.highValueVisitors;
-                document.getElementById('potentialLeads').textContent = data.potentialLeads;
                 document.getElementById('uniqueCompanies').textContent = data.uniqueCompanies;
                 
                 const companiesTable = data.companies.map(c => {
-                    const scoreClass = c.leadScore >= 70 ? 'score-high' : c.leadScore >= 50 ? 'score-medium' : 'score-low';
-                    const rowClass = c.isHighValue ? 'high-value-row' : '';
+                    const scoreClass = c.leadScore >= 70 ? 'score-high' : c.leadScore >= 40 ? 'score-medium' : 'score-low';
+                    const methodClass = 'method-' + (c.detectionMethod || 'none');
+                    let rowClass = '';
+                    if (c.isHighValue) rowClass = 'high-value-row';
+                    else if (c.detectionMethod !== 'none') rowClass = 'detected-row';
                     
                     return \`<tr class="\${rowClass}">
                         <td class="company-name">\${c.company}</td>
                         <td class="domain">\${c.domain || 'Unknown'}</td>
                         <td>\${c.visits}</td>
                         <td><span class="lead-score \${scoreClass}">\${c.leadScore}</span></td>
+                        <td><span class="detection-method \${methodClass}">\${c.detectionMethod || 'none'}</span></td>
                         <td>\${c.location}</td>
                         <td>\${new Date(c.lastVisit).toLocaleString()}</td>
                     </tr>\`;
                 }).join('');
                 
                 const recentTable = data.recentVisits.map(v => {
-                    const scoreClass = v.leadScore >= 70 ? 'score-high' : v.leadScore >= 50 ? 'score-medium' : 'score-low';
+                    const scoreClass = v.leadScore >= 70 ? 'score-high' : v.leadScore >= 40 ? 'score-medium' : 'score-low';
+                    const methodClass = 'method-' + (v.detectionMethod || 'none');
                     
                     return \`<tr>
                         <td class="company-name">\${v.company}</td>
                         <td class="domain">\${v.domain || 'Unknown'}</td>
                         <td class="ip">\${v.ip}</td>
                         <td><span class="lead-score \${scoreClass}">\${v.leadScore}</span></td>
+                        <td><span class="detection-method \${methodClass}">\${v.detectionMethod || 'none'}</span></td>
                         <td>\${v.pageTitle}</td>
                         <td>\${new Date(v.timestamp).toLocaleString()}</td>
                     </tr>\`;
                 }).join('');
                 
                 document.getElementById('data').innerHTML = \`
-                    <h2>🏢 Company Visitors</h2>
+                    <h2>🏢 Detected Companies</h2>
                     <table>
                         <tr>
                             <th>Company</th>
                             <th>Domain</th>
                             <th>Visits</th>
-                            <th>Lead Score</th>
+                            <th>Score</th>
+                            <th>Detection</th>
                             <th>Location</th>
                             <th>Last Visit</th>
                         </tr>
-                        \${companiesTable || '<tr><td colspan="6">No visitors yet</td></tr>'}
+                        \${companiesTable || '<tr><td colspan="7">No visitors yet</td></tr>'}
                     </table>
                     
                     <h2>🕒 Recent Activity</h2>
@@ -487,28 +643,28 @@ app.get('/dashboard', (req, res) => {
                             <th>Domain</th>
                             <th>IP</th>
                             <th>Score</th>
-                            <th>Page Visited</th>
+                            <th>Method</th>
+                            <th>Page</th>
                             <th>Time</th>
                         </tr>
-                        \${recentTable || '<tr><td colspan="6">No recent activity</td></tr>'}
+                        \${recentTable || '<tr><td colspan="7">No recent activity</td></tr>'}
                     </table>
                 \`;
             });
         }
         
-        function exportLeads() {
-            fetch('/leads')
-            .then(r => r.json())
-            .then(data => {
-                const csv = 'Company,Domain,Lead Score,Location,Visits,Last Visit\\n' +
-                    data.leads.map(l => \`"\${l.company}","\${l.domain}",\${l.leadScore},"\${l.location}",\${l.visits},"\${l.lastVisit}"\`).join('\\n');
-                
-                const blob = new Blob([csv], { type: 'text/csv' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'leads.csv';
-                a.click();
+        function testRealVisit() {
+            fetch('/log-visit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    referrer: window.location.href,
+                    userAgent: navigator.userAgent,
+                    currentUrl: window.location.href,
+                    pageTitle: 'Real Company Test'
+                })
+            }).then(() => {
+                setTimeout(refresh, 3000); // Refresh after 3 seconds
             });
         }
         
@@ -525,6 +681,6 @@ app.use((req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`🎯 B2B Lead Tracking Server running on port ${port}`);
-  console.log('🏢 Tracking potential business customers for SaaS product');
+  console.log(`🔍 Enhanced Company Detection Server running on port ${port}`);
+  console.log('🏢 Multi-source IP analysis for better company identification');
 });

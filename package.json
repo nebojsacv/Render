@@ -1,56 +1,21 @@
-// Referrer tracking server with simple dashboard (Node.js + Express)
-
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const app = express();
-const port = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(bodyParser.json());
-
-let visits = [];
-
-// POST endpoint to receive referrer logs
-app.post('/log-visit', (req, res) => {
-  const referrer = req.body.referrer || 'Direct';
-  let domain = 'unknown';
-  try {
-    domain = new URL(referrer).hostname;
-  } catch (e) {
-    domain = 'direct';
+{
+  "name": "referrer-tracker",
+  "version": "1.0.0",
+  "description": "Referrer tracking server with dashboard",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
-  visits.push({
-    domain,
-    timestamp: new Date().toISOString()
-  });
-  res.sendStatus(200);
-});
-
-// GET endpoint for dashboard view
-app.get('/dashboard', (req, res) => {
-  // Aggregate visits by domain
-  const summary = {};
-  visits.forEach(visit => {
-    if (!summary[visit.domain]) {
-      summary[visit.domain] = { count: 0, lastVisit: '' };
-    }
-    summary[visit.domain].count++;
-    summary[visit.domain].lastVisit = visit.timestamp;
-  });
-
-  const result = Object.entries(summary).map(([domain, data]) => ({
-    domain,
-    visits: data.count,
-    lastVisit: data.lastVisit
-  }));
-
-  res.json(result);
-});
-
-// Root endpoint to test server
-app.get('/', (req, res) => {
-  res.send('Referrer tracking server is running.');
-});
-
-app.listen(port, () => console.log(`Tracker server running on port ${port}`));
+}
